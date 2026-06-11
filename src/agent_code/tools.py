@@ -12,7 +12,7 @@ from .fs_safety import (
     ensure_text_file,
     ensure_within_size,
     resolve_in_cwd,
-    should_skip_path,
+    should_skip,
     truncate_output,
 )
 from .model import ToolCall, ToolResult
@@ -51,7 +51,7 @@ def system_time(args: dict[str, Any], ctx: ToolContext) -> str:
     return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 def read_file(args: dict[str, Any], ctx: ToolContext) -> str:
-    path_str = args.get("path")
+    path_str = args.get("path", "")
     if not path_str:
         return "Error: 'path' argument is required."
     try:
@@ -76,7 +76,7 @@ def list_files(args: dict[str, Any], ctx: ToolContext) -> str:
     # dir first, then files
     for child in sorted(base_path.iterdir(), key = lambda p: (not p.is_dir(), p.name)):
         rel_path = child.relative_to(ctx.cwd)
-        if should_skip_path(rel_path, ctx.skip_policy):
+        if should_skip(rel_path, ctx.skip_policy):
             continue
         entries.append(f"{child.name}/" if child.is_dir() else child.name)
     return truncate_output("\n".join(entries)) or "[empty directory]"
@@ -132,12 +132,16 @@ def create_default_tool_registry() -> ToolRegistry:
     ))
     registry.register_tool(Tool(
         name="read_file",
-        description="Read the content of a text file within the current working directory.",
+        description="""
+        Read a text file.
+        Required argument:
+        - path: relative file path (example: pyproject.toml)
+        """,
         run=read_file,
         parameters={
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Relative path to the file to read"}
+                "path": {"type": "string", "description": "Relative path inside cwd"}
             },
             "required": ["path"]
         }

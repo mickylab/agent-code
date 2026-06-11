@@ -6,6 +6,7 @@ from typing import Any
 
 from .model import ModelProvider, ModelResponse
 from .tools import ToolContext, ToolRegistry
+from .fs_safety import SkipPolicy, load_gitignore
 
 @dataclass
 class AgentResult:
@@ -57,7 +58,10 @@ def run_agent(
     on_text_delta = None
     ) -> AgentResult:
     resolved_cwd = cwd.resolve() if cwd else Path.cwd()
-    ctx = ToolContext(cwd = resolved_cwd)
+    ctx = ToolContext(
+        cwd = resolved_cwd,
+        skip_policy = SkipPolicy.default(load_gitignore(resolved_cwd))
+    )
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     trace: list[str] = []
