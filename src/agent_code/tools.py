@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -251,6 +253,10 @@ WEB_FETCH_MAX_CHARS = 20_000
 WEB_URL_MAX_LENGTH = 2000
 WEB_FETCH_TIMEOUT_S = 30.0
 WEB_SEARCH_TIMEOUT_S = 15.0
+WEB_FETCH_CACHE_TTL_S = 15 * 60  # 15 minutes
+WEB_FETCH_CACHE_MAX_SIZE = 32
+
+_web_fetch_cache: OrderedDict[str, tuple[float, str]] = OrderedDict()
 
 def _validate_url(url: str) -> bool:
     # the first gateway for web fetch tool
@@ -279,6 +285,17 @@ def web_fetch(args: dict[str, Any], ctx: ToolContext) -> str:
         _validate_url(url)
     except ValueError as e:
         return f"Error: {str(e)}"
+
+    # Cache lookup
+    now = time.monotonic()
+    if url in _web_fetch_cache:
+        ts, cached_body = _web_fetch_cache[url]
+        if now - ts < WEB_FETCH_CACHE_TTL_S:
+            _web_fetch_cache.move_to_end(url)
+            return cached_body
+        else:
+            del _web_fetch_cache[url]
+
     headers = {"User-Agent": WEB_USER_AGENT, "Accept": "text/html,text/*;q=0.9,*/*;q=0.5"}
     try:
         with httpx.Client(timeout=WEB_FETCH_TIMEOUT_S, follow_redirects=True) as client:
@@ -295,7 +312,15 @@ def web_fetch(args: dict[str, Any], ctx: ToolContext) -> str:
         body = resp.text
     else:
         return f"Error: Unsupported Content-Type '{content_type or 'unknown'}'."
-    return truncate_output(body, WEB_FETCH_MAX_CHARS)
+    result = truncate_output(body, WEB_FETCH_MAX_CHARS)
+
+    # Cache store + eviction
+    _web_fetch_cache[url] = (now, result)
+    _web_fetch_cache.move_to_end(url)
+    while len(_web_fetch_cache) > WEB_FETCH_CACHE_MAX_SIZE:
+        _web_fetch_cache.popitem(last=False)
+
+    return result
 
 def _unwrap_duckduckgo_url(href: str) -> str:
     # DuckDuckGo search results often have URLs wrapped in a redirect like "https://duckduckgo.com/l/?kh=-1&uddg=https%3A%2F%2Fexample.com"
