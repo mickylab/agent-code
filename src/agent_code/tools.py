@@ -14,6 +14,7 @@ import html2text
 import httpx
 
 from .fs_safety import (
+    MAX_READ_BYTES,
     ReadFileState,
     SkipPolicy,
     ensure_text_file,
@@ -61,15 +62,43 @@ def read_file(args: dict[str, Any], ctx: ToolContext) -> str:
     path_str = args.get("path", "")
     if not path_str:
         return "Error: 'path' argument is required."
+    
+    offset = int(args.get("offset", 0))
+    limit = args.get("limit")
+
+    if offset < 0:
+        return "Error: 'offset' must be non-negative."
+    if limit is not None:
+        limit = int(limit)
+        if limit <= 0:
+            return "Error: 'limit' must be a positive integer."
+
     try:
         path = resolve_in_cwd(ctx.cwd, path_str)
         ensure_text_file(path)
-        ensure_within_size(path)
-        text = path.read_text(encoding="utf-8", errors="replace")
+        file_size = path.stat().st_size
+
+        if file_size > MAX_READ_BYTES and limit is None:
+            return (
+                f"Error: file is too large to read all at once "
+                f"({file_size} bytes > {MAX_READ_BYTES} bytes). "
+                f"Use offset and limit to read it in chunks, for example: "
+                f'{{"path": "{path_str}", "offset": 0, "limit": 200}}'
+            )
+        
+        lines: list[str] = []
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f):
+                if i < offset:
+                    continue
+                if limit is not None and len(lines) >= limit:
+                    break
+                lines.append(line)
+        text = "".join(lines)
     except (FileNotFoundError, IsADirectoryError, ValueError) as e:
         return f"Error reading file: {str(e)}"
     ctx.read_state.record(path, text)
-    return truncate_output(text)
+    return text or "[empty]"
 
 def list_files(args: dict[str, Any], ctx: ToolContext) -> str:
     path_str = args.get("path", ".")
@@ -369,14 +398,31 @@ def create_default_tool_registry() -> ToolRegistry:
         name="read_file",
         description="""
         Read a text file.
+        Supports line-based pagination using offset and limit.
         Required argument:
         - path: relative file path (example: pyproject.toml)
+        Optional arguments:
+        - offset: line offset to start reading from (default: 0)
+        - limit: maximum number of lines to read (default: None, meaning no limit)
         """,
         run=read_file,
         parameters={
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Relative path inside cwd"}
+                "path": {
+                    "type": "string", 
+                    "description": "Relative path inside cwd"
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Line offset to start reading from, 0-based",
+                    "default": 0
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of lines to read",
+                    "default": None
+                }
             },
             "required": ["path"]
         }
