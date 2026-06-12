@@ -179,6 +179,38 @@ def _grep_python(pattern: str, base_path: Path, glob_arg: str | None, ignore_cas
                 matches.append(f"{rel_path}:{i}:{line}")
     return truncate_output("\n".join(matches) or "[no matches]")
 
+def project_tree(args: dict[str, Any], ctx: ToolContext) -> str:
+    max_depth = int(args.get("max_depth", 3))
+    max_nodes = 200
+    lines: list[str] = [f"{ctx.cwd.name}/"]
+    nodes = 0
+
+    def walk(path: Path, depth: int = 0) -> None:
+        nonlocal nodes
+        if depth > max_depth:
+            return
+        children = sorted(
+            (
+                p for p in path.iterdir()
+                if not should_skip(p.relative_to(ctx.cwd), ctx.skip_policy)
+            )
+            , key = lambda p: (not p.is_dir(), p.name)
+        )
+        for child in children:
+            if nodes >= max_nodes:
+                if nodes == max_nodes:
+                    lines.append("  " * depth + "...[truncated]")
+                    nodes += 1
+                return
+            suffix = "/" if child.is_dir() else ""
+            lines.append("  " * depth + child.name + suffix)
+            nodes += 1
+            if child.is_dir():
+                walk(child, depth + 1)
+        
+    walk(ctx.cwd, 1)
+    return truncate_output("\n".join(lines))
+
 class ToolRegistry:
     def __init__(self) -> None:
         self.tools: dict[str, Tool] = {}
@@ -281,6 +313,22 @@ def create_default_tool_registry() -> ToolRegistry:
                 "ignore_case": {"type": "boolean", "description": "Whether to ignore case when matching the regex pattern", "default": False}
             },
             "required": ["pattern"]
+        }
+    ))
+    registry.register_tool(Tool(
+        name="project_tree",
+        description="Show a tree view of the project files up to a certain depth. Example usage: max_depth=2",
+        run=project_tree,
+        parameters={
+            "type": "object",
+            "properties": {
+                "max_depth": {
+                    "type": "integer", 
+                    "description": "Maximum depth to show in the tree, defaults to 3", 
+                    "default": 3
+                }
+            },
+            "required": []
         }
     ))
 
