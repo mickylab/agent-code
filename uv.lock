@@ -9,6 +9,7 @@ source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
     { name = "html2text" },
+    { name = "httpx" },
     { name = "pathspec" },
     { name = "python-dotenv" },
     { name = "rich" },
@@ -24,6 +25,7 @@ dev = [
 requires-dist = [
     { name = "anthropic", specifier = ">=0.105.2" },
     { name = "html2text", specifier = ">=2025.4.15" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "pathspec", specifier = ">=1.1.1" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "rich", specifier = ">=15.0.0" },

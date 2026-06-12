@@ -8,6 +8,10 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import parse_qs, unquote, urlparse
+
+import html2text
+import httpx
 
 from .fs_safety import (
     ReadFileState,
@@ -211,6 +215,107 @@ def project_tree(args: dict[str, Any], ctx: ToolContext) -> str:
     walk(ctx.cwd, 1)
     return truncate_output("\n".join(lines))
 
+# Hard constraints for web tools live here, like fs_safety constants — never leak to callers.
+WEB_USER_AGENT = "agent-code/0.1 (+https://example.com/agent-code)"
+WEB_FETCH_MAX_BYTES = 10 * 1024 * 1024
+WEB_FETCH_MAX_CHARS = 20_000
+WEB_URL_MAX_LENGTH = 2000
+WEB_FETCH_TIMEOUT_S = 30.0
+WEB_SEARCH_TIMEOUT_S = 15.0
+
+def _validate_url(url: str) -> bool:
+    # the first gateway for web fetch tool
+    if len(url) > WEB_URL_MAX_LENGTH:
+        raise ValueError(f"URL length exceeds maximum of {WEB_URL_MAX_LENGTH} characters.")
+    parsed_url = urlparse(url)
+    if parsed_url.scheme not in ("http", "https"):
+        raise ValueError("Only http and https URLs are allowed.")
+    if parsed_url.username or parsed_url.password:
+        raise ValueError("URLs with embedded credentials are not allowed.")
+    if not parsed_url.hostname or "." not in parsed_url.hostname:
+        raise ValueError(f"Invalid hostname in URL: {parsed_url.hostname}.")
+
+def _html_to_markdown(html: str) -> str:
+    converter = html2text.HTML2Text()
+    converter.body_width = 0
+    converter.ignore_images = True
+    converter.ignore_emphasis = True
+    return converter.handle(html).strip()
+
+def web_fetch(args: dict[str, Any], ctx: ToolContext) -> str:
+    url = args.get("url", "")
+    if not url:
+        return "Error: 'url' argument is required."
+    try:
+        _validate_url(url)
+    except ValueError as e:
+        return f"Error: {str(e)}"
+    headers = {"User-Agent": WEB_USER_AGENT, "Accept": "text/html,text/*;q=0.9,*/*;q=0.5"}
+    try:
+        with httpx.Client(timeout=WEB_FETCH_TIMEOUT_S, follow_redirects=True) as client:
+            resp = client.get(url, headers=headers)
+            resp.raise_for_status()
+    except httpx.RequestError as e:
+        return f"Error fetching URL: {str(e)}"
+    if len(resp.content) > WEB_FETCH_MAX_BYTES:
+        return f"Error: Fetched content exceeds maximum size of {WEB_FETCH_MAX_BYTES} bytes."
+    content_type = resp.headers.get("Content-Type", "").lower()
+    if "text/html" in content_type or "application/xhtml+xml" in content_type:
+        body = _html_to_markdown(resp.text)
+    elif content_type.startswith("text/") or "json" in content_type or "xml" in content_type:
+        body = resp.text
+    else:
+        return f"Error: Unsupported Content-Type '{content_type or 'unknown'}'."
+    return truncate_output(body, WEB_FETCH_MAX_CHARS)
+
+def _unwrap_duckduckgo_url(href: str) -> str:
+    # DuckDuckGo search results often have URLs wrapped in a redirect like "https://duckduckgo.com/l/?kh=-1&uddg=https%3A%2F%2Fexample.com"
+    if "/l/" not in href:
+        return href
+    parsed = urlparse(href if href.startswith("http") else f"https:{href}")
+    params = parse_qs(parsed.query)
+    if "uddg" in params:
+        return unquote(params["uddg"][0])
+    return href
+
+def _duckduckgo_search(query: str, max_results: int) -> list[dict[str, str]]:
+    headers = {"User-Agent": WEB_USER_AGENT}
+    with httpx.Client(timeout=WEB_SEARCH_TIMEOUT_S, follow_redirects=True) as client:
+        resp = client.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": query},
+            headers=headers,
+        )
+        resp.raise_for_status()
+    pattern = re.compile(
+        r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+        re.DOTALL,
+    )
+    results: list[dict[str, str]] = []
+    for href, title_html in pattern.findall(resp.text):
+        title = re.sub(r"<[^>]+>", "", title_html).strip()
+        url = _unwrap_duckduckgo_url(href)
+        if not title or not url:
+            continue
+        results.append({"title": title, "url": url})
+        if len(results) >= max_results:
+            break
+    return results
+
+def web_search(args: dict[str, Any], ctx: ToolContext) -> str:
+    query = args.get("query", "")
+    if not query:
+        return "Error: 'query' argument is required."
+    max_results = max(1, min(int(args.get("max_results", 5)), 10))
+    try:
+        results = _duckduckgo_search(query, max_results)
+    except httpx.RequestError as e:
+        return f"Error performing web search: {str(e)}"
+    if not results:
+        return "[no results]"
+    lines = [f"- {r['title']}\n  {r['url']}" for r in results]
+    return truncate_output("\n".join(lines))
+
 class ToolRegistry:
     def __init__(self) -> None:
         self.tools: dict[str, Tool] = {}
@@ -329,6 +434,31 @@ def create_default_tool_registry() -> ToolRegistry:
                 }
             },
             "required": []
+        }
+    ))
+    registry.register_tool(Tool(
+        name="web_fetch",
+        description="Fetch the content of a web page. Example usage: url='https://www.example.com'",
+        run=web_fetch,
+        parameters={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "The HTTP or HTTPS URL of the web page to fetch"}
+            },
+            "required": ["url"]
+        }
+    ))
+    registry.register_tool(Tool(
+        name="web_search",
+        description="Perform a web search and return the top results. Example usage: query='latest news on AI', max_results=5",
+        run=web_search,
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query"},
+                "max_results": {"type": "integer", "description": "Maximum number of search results to return (1-10), defaults to 5", "default": 5}
+            },
+            "required": ["query"]
         }
     ))
 
