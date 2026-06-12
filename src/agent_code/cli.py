@@ -37,7 +37,7 @@ def run_once(
     base_url: str | None,
     max_steps: int,
 ) -> None:
-    provider = create_provider(provider_name, model, base_url)
+    provider = create_provider(provider_name, model, base_url) #TODO: use slash command to change provider/model on the fly
     default_tools = create_default_tool_registry()
     result = run_agent(prompt, provider, default_tools, max_steps = max_steps, cwd = cwd, stream = False)
     for line in result.trace:

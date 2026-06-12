@@ -30,6 +30,7 @@ def _assistant_message(response: ModelResponse) -> dict[str, Any]:
         })
     return {"role": "assistant", "content": content}
 
+# one result per message, keep it or delete it
 def _tool_result_message(tool_call_id: str, content: str, is_error: bool = False) -> dict[str, Any]:
     return {
         "role": "user",
@@ -84,10 +85,22 @@ def run_agent(
             return AgentResult(final_response=final_response, trace=trace, messages=messages)
         
         for tool_call in response.tool_calls or []:
-            trace.append(f"Calling tool: {tool_call.name} with args {tool_call.args}")
-            tool_result = tools.run(tool_call, ctx)
-            trace.append(f"Observation: {tool_result.content} ({'' if tool_result.is_error else 'no'} error)")
-            messages.append(_tool_result_message(tool_result.tool_call_id, tool_result.content, tool_result.is_error))
+            """ The Anthropic Messages API requires: every tool_use in one assistant message must have its matching tool_result in the very next user message. 
+            """
+            tool_result_blocks: list[dict[str, Any]] = []
+            for tool_call in response.tool_calls:
+                trace.append(f"Calling tool: {tool_call.name} with args {tool_call.args}")
+                tool_result = tools.run(tool_call, ctx)
+                trace.append(f"Observation: {tool_result.content} \n ({'' if tool_result.is_error else 'no'} error)")
+                tool_result_blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_result.tool_call_id,
+                        "content": tool_result.content,
+                        "is_error": tool_result.is_error
+                    }
+                )
+            messages.append({"role": "user", "content": tool_result_blocks})
 
     final_response = f"Stopped after reaching max steps: {max_steps}"
     trace.append(f"Final response: {final_response}")
