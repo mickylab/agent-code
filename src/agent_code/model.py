@@ -37,7 +37,7 @@ def _to_anthropic_tools(tools: list[Any]) -> list[dict[str, Any]]:
         {
             "name": tool.name,
             "description": tool.description,
-            "parameters": tool.parameters
+            "input_schema": tool.parameters
         }
         for tool in tools
     ]
@@ -59,7 +59,7 @@ def _content_block_to_dict(block: Any) -> dict[str, Any]:
 class AnthropicProvider:
     def __init__(
         self,
-        model: str = "Qwen3-8B-Q5_K_M",
+        model: str = "Qwen3.5-9B-MLX-4bit",
         max_tokens: int = 1024,
         base_url: str | None = None,
     ) -> None:

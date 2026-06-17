@@ -99,6 +99,7 @@ def read_file(args: dict[str, Any], ctx: ToolContext) -> str:
         text = "".join(lines)
     except (FileNotFoundError, IsADirectoryError, ValueError) as e:
         return f"Error reading file: {str(e)}"
+    # pre-placed hook for a write safety check. If the agent is trying to read a file it just wrote, the content may be stale on disk — record the read content and mtime here so that if the agent tries to read the same file again, we can detect it and return an error instead of stale content.
     ctx.read_state.record(path, text)
     return text or "[empty]"
 
