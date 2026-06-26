@@ -26,6 +26,7 @@ from .fs_safety import (
     apply_single_replace,
 )
 from .model import ToolCall, ToolResult
+from .file_history import backup
 
 @dataclass
 class ToolContext:
@@ -381,6 +382,13 @@ def file_write(args: dict[str, Any], ctx: ToolContext) -> str:
         path = resolve_in_cwd(ctx.cwd, file_path)
     except ValueError as e:
         return f"Error writing file: {str(e)}"
+    # do backup
+    if path.exists():
+        try:
+            old_content = path.read_text(encoding="utf-8")
+            backup(ctx.cwd, path, old_content)
+        except Exception:
+            pass
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     ctx.read_state.record(path, content)
@@ -404,6 +412,7 @@ def file_edit(args: dict[str, Any], ctx: ToolContext) -> str:
     except (FileNotFoundError, IsADirectoryError) as e:
         return f"Error editing file: {str(e)}"
     
+    backup(ctx.cwd, path, content)
     # Race guard: agent.py already ran apply_single_replace to compute the diff.
     # If the on-disk content drifted between confirm and now, this catches it.
     new_content, error = apply_single_replace(content, old_str, new_str, replace_all)
