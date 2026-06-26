@@ -77,3 +77,40 @@ def load_gitignore(cwd: Path) -> pathspec.PathSpec | None:
         return None
     lines = gitignore_path.read_text(encoding="utf-8", errors="replace").splitlines()
     return pathspec.PathSpec.from_lines("gitwildmatch", lines)
+
+def ensure_read_before_edit(state: ReadFileState, path: Path) -> str | None:
+    # Has the file been read this session? Return an error string if not.
+    if path not in state.entries:
+        return f"Error: File {path} has not been read before edit."
+    return None
+
+def check_mtime_conflict(state: ReadFileState, path: Path) -> str | None:
+    # Check if the file has been modified since it was last read. mtime changed = conflict.
+    # No content-equals fallback in this version - re-read to refresh
+    entry = state.entries.get(path)
+    if entry is None:
+        return None # never-read case first
+    old_mtime_ns, _ = entry
+    try:
+        cur_mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        return None
+    if cur_mtime_ns > old_mtime_ns:
+        return f"Error: File {path} has been modified since it was last read."
+    return None
+
+def apply_single_replace(content: str, old: str, new: str, replace_all: bool) -> tuple[str | None, str | None]:
+    # find old content and replace with new content
+    # Returns (new_content, error): success -> error is None; failure -> new_content is None.
+    if old == "":
+        return None, "Error: Old content must not be empty."
+    if old == new:
+        return None, "Error: Old content and new content are exactly the same."
+    
+    count = content.count(old)
+    if count == 0:
+        return None, f"Error: content to replace not found in file."
+    if not replace_all and count > 1:
+        return None, f"Error: Multiple occurrences found, {count} matches but replace_all is False."
+    new_content = content.replace(old, new) if replace_all else content.replace(old, new, 1)
+    return new_content, None

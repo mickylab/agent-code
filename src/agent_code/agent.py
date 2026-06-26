@@ -7,7 +7,7 @@ from rich.console import Console
 
 from .model import ModelProvider, ModelResponse, ToolResult
 from .tools import ToolContext, ToolRegistry
-from .fs_safety import SkipPolicy, load_gitignore, resolve_in_cwd
+from .fs_safety import SkipPolicy, load_gitignore, resolve_in_cwd, apply_single_replace, check_mtime_conflict, ensure_read_before_edit
 from .diff_ui import confirm_edit, render_diff
 
 console = Console()
@@ -120,19 +120,36 @@ def run_agent(
 
                     old_content = path.read_text(encoding="utf-8") if path.exists() else ""
 
-                    # 2. check file_write, v1 only check read before write, v2 will check file_edit
+                    # 2. check read before write, mtime conflict
                     validation_error: str | None = None
-                    if tool_call.name == "file_write" and path.exists():
-                        if path not in ctx.read_state.entries:
+                    if tool_call.name == "file_write":
+                        if path.exists():
                             validation_error = (
-                                "Error: File has not been read before write."
-                                f" Read {path_str} first before writing."
+                                ensure_read_before_edit(ctx.read_state, path)
+                                or check_mtime_conflict(ctx.read_state, path)
+                            )
+                    else:
+                        if not path.exists():
+                            validation_error = f"Error: File does not exist at {path_str}."
+                        else:
+                            validation_error = (
+                                ensure_read_before_edit(ctx.read_state, path)
+                                or check_mtime_conflict(ctx.read_state, path)
                             )
                     
-                    # 3. new content, ignore diff for v1
+                    # 3. file_write use content directly, file_edit trial run in memory
                     new_content: str | None = None
                     if tool_call.name == "file_write":
                         new_content = tool_call.args.get("content", "")
+                    elif tool_call.name == "file_edit" and validation_error is None:
+                        new_content, replace_error = apply_single_replace(
+                            old_content,
+                            tool_call.args.get("old_str", ""),
+                            tool_call.args.get("new_str", ""),
+                            tool_call.args.get("replace_all", False)
+                        )
+                        if replace_error is not None:
+                            validation_error = replace_error
 
                     # 4. if validation failed, raise error
                     if validation_error is not None:

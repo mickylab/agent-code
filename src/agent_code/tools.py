@@ -20,10 +20,10 @@ from .fs_safety import (
     ReadFileState,
     SkipPolicy,
     ensure_text_file,
-    ensure_within_size,
     resolve_in_cwd,
     should_skip,
     truncate_output,
+    apply_single_replace,
 )
 from .model import ToolCall, ToolResult
 
@@ -386,6 +386,33 @@ def file_write(args: dict[str, Any], ctx: ToolContext) -> str:
     ctx.read_state.record(path, content)
     return f"Wrote {len(content)} chars to {file_path}"
 
+def file_edit(args: dict[str, Any], ctx: ToolContext) -> str:
+    # String-replace edit. Pre-checks live in agent.py's intercept block.
+    path_str = args.get("file_path", "")
+    old_str = args.get("old_str", "")
+    new_str = args.get("new_str", "")
+    replace_all = bool(args.get("replace_all", False))
+
+    if not path_str:
+        return "Error: 'file_path' argument is required."
+    try:
+        path = resolve_in_cwd(ctx.cwd, path_str)
+    except ValueError as e:
+        return f"Error editing file: {str(e)}"
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, IsADirectoryError) as e:
+        return f"Error editing file: {str(e)}"
+    
+    # Race guard: agent.py already ran apply_single_replace to compute the diff.
+    # If the on-disk content drifted between confirm and now, this catches it.
+    new_content, error = apply_single_replace(content, old_str, new_str, replace_all)
+    if error:
+        return error
+    path.write_text(new_content, encoding="utf-8")
+    ctx.read_state.record(path, new_content)
+    return f"Edited {path_str}: replaced {len(old_str)} chars with {len(new_str)} chars"
+
 class ToolRegistry:
     def __init__(self) -> None:
         self.tools: dict[str, Tool] = {}
@@ -559,6 +586,21 @@ def create_default_tool_registry() -> ToolRegistry:
                 "content": {"type": "string", "description": "The content to write to the file"}
             },
             "required": ["file_path", "content"]
+        }
+    ))
+    registry.register_tool(Tool(
+        name="file_edit",
+        description="Edit a file by replacing old content with new content. Example usage: file_path='output.txt', old_str='Hello', new_str='Hi', replace_all=true",
+        run=file_edit,
+        parameters={
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "Relative path inside cwd"},
+                "old_str": {"type": "string", "description": "The replacement string. Must contain ONLY the text that replaces old_str — do NOT include surrounding context."},
+                "new_str": {"type": "string", "description": "The string to replace with"},
+                "replace_all": {"type": "boolean", "description": "Whether to replace all occurrences, defaults to False", "default": False}
+            },
+            "required": ["file_path", "old_str", "new_str"]
         }
     ))
 
