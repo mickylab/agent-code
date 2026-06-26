@@ -3,10 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from rich.console import Console
 
-from .model import ModelProvider, ModelResponse
+from .model import ModelProvider, ModelResponse, ToolResult
 from .tools import ToolContext, ToolRegistry
-from .fs_safety import SkipPolicy, load_gitignore
+from .fs_safety import SkipPolicy, load_gitignore, resolve_in_cwd
+from .diff_ui import confirm_edit, render_diff
+
+console = Console()
 
 @dataclass
 class AgentResult:
@@ -58,11 +62,16 @@ def run_agent(
     stream: bool = False,
     on_text_delta = None
     ) -> AgentResult:
-    resolved_cwd = cwd.resolve() if cwd else Path.cwd()
+    resolved_cwd = cwd or Path.cwd()
     ctx = ToolContext(
         cwd = resolved_cwd,
         skip_policy = SkipPolicy.default(load_gitignore(resolved_cwd))
     )
+
+    def emit(line: str) -> None:
+        # stream trace
+        trace.append(line) # for testing
+        console.print(line) # for user
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     trace: list[str] = []
@@ -81,7 +90,7 @@ def run_agent(
 
         if not response.tool_calls:
             final_response = response.text or ""
-            trace.append(f"Final response: {final_response}")
+            emit(f"Final response: {final_response}")
             return AgentResult(final_response=final_response, trace=trace, messages=messages)
         
         for tool_call in response.tool_calls or []:
@@ -89,9 +98,77 @@ def run_agent(
             """
             tool_result_blocks: list[dict[str, Any]] = []
             for tool_call in response.tool_calls:
-                trace.append(f"Calling tool: {tool_call.name} with args {tool_call.args}")
+                emit(f"Calling tool: {tool_call.name} with args {tool_call.args}")
+                # Intercept file_write / file_edit through the harness: run pre-validation first, then render the diff, and finally ask the user for confirmation.
+                if tool_call.name in ("file_write", "file_edit"):
+                    path_str = tool_call.args.get("file_path", "")
+                    # 1. resolve path, raise error if outside cwd
+                    try:
+                        path = resolve_in_cwd(ctx.cwd, path_str)
+                    except (ValueError, OSError) as e:
+                        tool_result = ToolResult(tool_call.id, f"Error resolving path: {e}", is_error=True)
+                        emit(f"Observation: {tool_result.content}")
+                        tool_result_blocks.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_result.tool_call_id,
+                                "content": tool_result.content,
+                                "is_error": True
+                            }
+                        )
+                        continue
+
+                    old_content = path.read_text(encoding="utf-8") if path.exists() else ""
+
+                    # 2. check file_write, v1 only check read before write, v2 will check file_edit
+                    validation_error: str | None = None
+                    if tool_call.name == "file_write" and path.exists():
+                        if path not in ctx.read_state.entries:
+                            validation_error = (
+                                "Error: File has not been read before write."
+                                f" Read {path_str} first before writing."
+                            )
+                    
+                    # 3. new content, ignore diff for v1
+                    new_content: str | None = None
+                    if tool_call.name == "file_write":
+                        new_content = tool_call.args.get("content", "")
+
+                    # 4. if validation failed, raise error
+                    if validation_error is not None:
+                        tool_result = ToolResult(tool_call.id, validation_error, is_error=True)
+                        emit(f"Observation: {tool_result.content}")
+                        tool_result_blocks.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_result.tool_call_id,
+                                "content": tool_result.content,
+                                "is_error": True
+                            }
+                        )
+                        continue
+
+                    # 5. validation passed, render diff and user confirmation
+                    if new_content is not None:
+                        diff_text = render_diff(old_content, new_content, path_str)
+                        console.print(f"\n[bold]Diff for {path_str}:[/bold]")
+                        console.print(diff_text)
+                        if not confirm_edit(path_str):
+                            tool_result = ToolResult(tool_call.id, "Error: Edit not confirmed by user.", is_error=True)
+                            emit(f"Observation: {tool_result.content}")
+                            tool_result_blocks.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_result.tool_call_id,
+                                    "content": tool_result.content,
+                                    "is_error": True
+                                }
+                            )
+                            continue
+                
                 tool_result = tools.run(tool_call, ctx)
-                trace.append(f"Observation: {tool_result.content} \n ({'' if tool_result.is_error else 'no'} error)")
+                emit(f"Observation: {tool_result.content}")
+
                 tool_result_blocks.append(
                     {
                         "type": "tool_result",
@@ -103,5 +180,5 @@ def run_agent(
             messages.append({"role": "user", "content": tool_result_blocks})
 
     final_response = f"Stopped after reaching max steps: {max_steps}"
-    trace.append(f"Final response: {final_response}")
+    emit(f"Final response: {final_response}")
     return AgentResult(final_response = final_response, trace = trace, messages = messages)

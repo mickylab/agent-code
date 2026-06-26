@@ -59,7 +59,7 @@ def _content_block_to_dict(block: Any) -> dict[str, Any]:
 class AnthropicProvider:
     def __init__(
         self,
-        model: str = "Qwen3.5-9B-MLX-4bit",
+        model: str = "gemma-4-e4b-it-4bit",
         max_tokens: int = 1024,
         base_url: str | None = None,
     ) -> None:

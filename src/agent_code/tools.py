@@ -371,6 +371,21 @@ def web_search(args: dict[str, Any], ctx: ToolContext) -> str:
     lines = [f"- {r['title']}\n  {r['url']}" for r in results]
     return truncate_output("\n".join(lines))
 
+def file_write(args: dict[str, Any], ctx: ToolContext) -> str:
+    # Whole-file overwrite. Pre-checks happen in agent.py's intercept block.
+    file_path = args.get("file_path", "")
+    content = args.get("content", "")
+    if not file_path:
+        return "Error: 'file_path' argument is required."
+    try:
+        path = resolve_in_cwd(ctx.cwd, file_path)
+    except ValueError as e:
+        return f"Error writing file: {str(e)}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    ctx.read_state.record(path, content)
+    return f"Wrote {len(content)} chars to {file_path}"
+
 class ToolRegistry:
     def __init__(self) -> None:
         self.tools: dict[str, Tool] = {}
@@ -531,6 +546,19 @@ def create_default_tool_registry() -> ToolRegistry:
                 "max_results": {"type": "integer", "description": "Maximum number of search results to return (1-10), defaults to 5", "default": 5}
             },
             "required": ["query"]
+        }
+    ))
+    registry.register_tool(Tool(
+        name="file_write",
+        description="Write or overwrite content to a file. Example usage: file_path='output.txt', content='Hello, World!'",
+        run=file_write,
+        parameters={
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "Relative path inside cwd"},
+                "content": {"type": "string", "description": "The content to write to the file"}
+            },
+            "required": ["file_path", "content"]
         }
     ))
 

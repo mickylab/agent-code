@@ -39,16 +39,14 @@ def run_once(
 ) -> None:
     provider = create_provider(provider_name, model, base_url) #TODO: use slash command to change provider/model on the fly
     default_tools = create_default_tool_registry()
-    result = run_agent(prompt, provider, default_tools, max_steps = max_steps, cwd = cwd, stream = False)
-    for line in result.trace:
-        console.print(line)
+    run_agent(prompt, provider, default_tools, max_steps = max_steps, cwd = cwd, stream = False)
 
 @app.callback(invoke_without_command=True)
 def main_command(
     prompt: str = typer.Argument("", help="The prompt to send to the agent"),
     cwd: Path = typer.Option(Path.cwd(), "--cwd", "-c", help="The working directory for the agent"),
     provider: str = typer.Option("anthropic", "--provider", "-p", help="The model provider to use"),
-    model: str = typer.Option("Qwen3.5-9B-MLX-4bit", "--model", "-m", help="The model to use"),
+    model: str = typer.Option("gemma-4-e4b-it-4bit", "--model", "-m", help="The model to use"),
     base_url: str | None = typer.Option(None, "--base-url", "-b", help="The base URL for the model provider"),
     max_steps: int = typer.Option(8, "--max-steps", "-s", help="The maximum number of steps for the agent to take")
     ) -> None:
