@@ -9,6 +9,7 @@ from .model import ModelProvider, ModelResponse, ToolResult
 from .tools import ToolContext, ToolRegistry
 from .fs_safety import SkipPolicy, load_gitignore, resolve_in_cwd, apply_single_replace, check_mtime_conflict, ensure_read_before_edit
 from .diff_ui import confirm_edit, render_diff
+from .prompt_ui import confirm_command
 
 console = Console()
 
@@ -182,7 +183,24 @@ def run_agent(
                                 }
                             )
                             continue
-                
+                elif tool_call.name == "bash":
+                    command = tool_call.args.get("command", "")
+                    timeout = tool_call.args.get("timeout", 30)
+                    console.print(f"\n[bold yellow]Command:[/bold yellow] {command}")
+                    console.print(f"[dim]timeout: {timeout}s  cwd: {ctx.cwd}[/dim]")
+                    if not confirm_command(command):
+                        tool_result = ToolResult(tool_call.id, "Error: command is rejected by user", is_error=True)
+                        emit(f"Observation: {tool_result.content}")
+                        tool_result_blocks.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_result.tool_call_id,
+                                "content": tool_result.content,
+                                "is_error": True,
+                            }
+                        )
+                        continue
+                        
                 tool_result = tools.run(tool_call, ctx)
                 emit(f"Observation: {tool_result.content}")
 

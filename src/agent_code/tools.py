@@ -27,6 +27,7 @@ from .fs_safety import (
 )
 from .model import ToolCall, ToolResult
 from .file_history import backup
+from .bash_runner import run_sync as _bash_run_sync
 
 @dataclass
 class ToolContext:
@@ -422,6 +423,26 @@ def file_edit(args: dict[str, Any], ctx: ToolContext) -> str:
     ctx.read_state.record(path, new_content)
     return f"Edited {path_str}: replaced {len(old_str)} chars with {len(new_str)} chars"
 
+def _git_status(args: dict[str, Any], ctx: ToolContext) -> str:
+    """git status——read only, default allow."""
+    return _bash_run_sync("git status", ctx.cwd, timeout=10)
+
+def _git_diff(args: dict[str, Any], ctx: ToolContext) -> str:
+    """git diff——read only, default allow."""
+    return _bash_run_sync("git diff", ctx.cwd, timeout=10)
+
+def bash(args: dict[str, Any], ctx: ToolContext) -> str:
+    """Execute a shell command. validation and user confirmation are handled in the agent.py intercept block."""
+    command = args.get("command", "")
+    if not command:
+        return "Error: 'command' argument is required."
+    timeout = int(args.get("timeout", 30))
+    background = bool(args.get("background", False))
+    # v1 sync only；v4 implement background=True branch
+    if background:
+        return "Error: background mode not implemented yet (coming in v4)"
+    return _bash_run_sync(command, ctx.cwd, timeout=timeout)
+
 class ToolRegistry:
     def __init__(self) -> None:
         self.tools: dict[str, Tool] = {}
@@ -611,6 +632,44 @@ def create_default_tool_registry() -> ToolRegistry:
             },
             "required": ["file_path", "old_str", "new_str"]
         }
+    ))
+    registry.register_tool(Tool(
+        name="git_status",
+        description="Run git status to see the current state of the working directory.",
+        run=_git_status,
+        parameters={"type": "object", "properties": {}, "required": []},
+    ))
+    registry.register_tool(Tool(
+        name="git_diff",
+        description="Run git diff to see unstaged changes in the working directory.",
+        run=_git_diff,
+        parameters={"type": "object", "properties": {}, "required": []},
+    ))
+    registry.register_tool(Tool(
+        name="bash",
+        description=(
+            "Execute a shell command. Working directory persists but shell state "
+            "does not (each call is a fresh shell). timeout in seconds (default 30). "
+            "Avoid cd; use the tool's implicit cwd instead."
+        ),
+        run=bash,
+        parameters={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Shell command to execute."},
+                "timeout": {
+                    "type": "integer",
+                    "description": "Timeout in seconds, default 30.",
+                    "default": 30,
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Run in background. Returns immediately with a background_id. Default false.",
+                    "default": False,
+                },
+            },
+            "required": ["command"],
+        },
     ))
 
     return registry
