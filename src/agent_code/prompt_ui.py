@@ -37,3 +37,20 @@ def confirm_command(command: str) -> bool:
 def confirm_tool_use(tool_name: str, detail: str) -> bool:
     """Ask the user whether to allow the use of a non-bash tool, e.g., accessing external network. Default is no."""
     return typer.confirm(f"Allow {tool_name}: {detail}?", default=False)
+
+def prompt_single_choice(question: str, labels: list[str]) -> str | None:
+    """Show a numbered menu for the user to select one option and return the selected label."""
+    import rich
+    console = rich.console.Console()
+    console.print(f"\n[bold yellow]? {question}[/bold yellow]")
+    for i, label in enumerate(labels, 1):
+        console.print(f"  {i}. {label}")
+    console.print(f"  0. [dim]Skip / Other[/dim]")
+    try:
+        choice = typer.prompt("Choice", default="0")
+        idx = int(choice)
+        if 1 <= idx <= len(labels):
+            return labels[idx - 1]
+        return None
+    except (ValueError, TypeError):
+        return None

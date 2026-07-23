@@ -8,8 +8,8 @@ from rich.console import Console
 from .model import ModelProvider, ModelResponse, ToolResult
 from .tools import ToolContext, ToolRegistry
 from .fs_safety import SkipPolicy, load_gitignore, resolve_in_cwd, apply_single_replace, check_mtime_conflict, ensure_read_before_edit
-from .diff_ui import confirm_edit, render_diff
-from .prompt_ui import confirm_command
+from .permissions import PermissionRequest, decide_permission
+from .prompt_ui import confirm_command, confirm_edit, confirm_tool_use, prompt_single_choice, render_diff
 
 console = Console()
 
@@ -60,6 +60,7 @@ def run_agent(
     tools: ToolRegistry,
     max_steps: int = 8,
     cwd: Path | None = None,
+    permission_mode: str = "default", # default | acceptEdits | plan
     stream: bool = False,
     on_text_delta = None
     ) -> AgentResult:
@@ -94,102 +95,125 @@ def run_agent(
             emit(f"Final response: {final_response}")
             return AgentResult(final_response=final_response, trace=trace, messages=messages)
         
-        for tool_call in response.tool_calls or []:
-            """ The Anthropic Messages API requires: every tool_use in one assistant message must have its matching tool_result in the very next user message. 
-            """
-            tool_result_blocks: list[dict[str, Any]] = []
-            for tool_call in response.tool_calls:
-                emit(f"Calling tool: {tool_call.name} with args {tool_call.args}")
-                # Intercept file_write / file_edit through the harness: run pre-validation first, then render the diff, and finally ask the user for confirmation.
-                if tool_call.name in ("file_write", "file_edit"):
-                    path_str = tool_call.args.get("file_path", "")
-                    # 1. resolve path, raise error if outside cwd
-                    try:
-                        path = resolve_in_cwd(ctx.cwd, path_str)
-                    except (ValueError, OSError) as e:
-                        tool_result = ToolResult(tool_call.id, f"Error resolving path: {e}", is_error=True)
-                        emit(f"Observation: {tool_result.content}")
-                        tool_result_blocks.append(
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": tool_result.tool_call_id,
-                                "content": tool_result.content,
-                                "is_error": True
-                            }
+        """ The Anthropic Messages API requires: every tool_use in one assistant message must have its matching tool_result in the very next user message. """
+        tool_result_blocks: list[dict[str, Any]] = []
+        for tool_call in response.tool_calls:
+            emit(f"Calling tool: {tool_call.name} with args {tool_call.args}")
+            # unified permission gateway
+            request = PermissionRequest(
+                tool_name=tool_call.name,
+                args=tool_call.args,
+                mode=permission_mode,
+                cwd=ctx.cwd,
+            )
+            decision = decide_permission(request)
+
+            edit_preview: tuple[str, str, str] | None = None
+            # Intercept file_write / file_edit through the harness: run pre-validation first, then render the diff, and finally ask the user for confirmation.
+            if tool_call.name in ("file_write", "file_edit") and decision.behavior != "deny":
+                path_str = tool_call.args.get("file_path", "")
+
+                try:
+                    path = resolve_in_cwd(ctx.cwd, path_str)
+                except (ValueError, OSError) as e:
+                    tool_result = ToolResult(tool_call.id, f"Error resolving path: {e}", is_error=True)
+                    emit(f"Observation: {tool_result.content}")
+                    tool_result_blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_result.tool_call_id,
+                            "content": tool_result.content,
+                            "is_error": True
+                        }
+                    )
+                    continue
+
+                old_content = path.read_text(encoding="utf-8") if path.exists() else ""
+
+                validation_error: str | None = None
+                if tool_call.name == "file_write":
+                    if path.exists():
+                        validation_error = (
+                            ensure_read_before_edit(ctx.read_state, path)
+                            or check_mtime_conflict(ctx.read_state, path)
                         )
-                        continue
-
-                    old_content = path.read_text(encoding="utf-8") if path.exists() else ""
-
-                    # 2. check read before write, mtime conflict
-                    validation_error: str | None = None
-                    if tool_call.name == "file_write":
-                        if path.exists():
-                            validation_error = (
-                                ensure_read_before_edit(ctx.read_state, path)
-                                or check_mtime_conflict(ctx.read_state, path)
-                            )
+                    new_content = tool_call.args.get("content", "")
+                else: # file_edit
+                    new_content = ""
+                    if not path.exists():
+                        validation_error = f"Error: File does not exist at {path_str}."
                     else:
-                        if not path.exists():
-                            validation_error = f"Error: File does not exist at {path_str}."
-                        else:
-                            validation_error = (
-                                ensure_read_before_edit(ctx.read_state, path)
-                                or check_mtime_conflict(ctx.read_state, path)
-                            )
-                    
-                    # 3. file_write use content directly, file_edit trial run in memory
-                    new_content: str | None = None
-                    if tool_call.name == "file_write":
-                        new_content = tool_call.args.get("content", "")
-                    elif tool_call.name == "file_edit" and validation_error is None:
-                        new_content, replace_error = apply_single_replace(
+                        validation_error = (
+                            ensure_read_before_edit(ctx.read_state, path)
+                            or check_mtime_conflict(ctx.read_state, path)
+                        )
+                    if validation_error is None:
+                        new_content, replace_err = apply_single_replace(
                             old_content,
                             tool_call.args.get("old_str", ""),
                             tool_call.args.get("new_str", ""),
-                            tool_call.args.get("replace_all", False)
+                            bool(tool_call.args.get("replace_all", False)),
                         )
-                        if replace_error is not None:
-                            validation_error = replace_error
+                        if replace_err is not None:
+                            validation_error = replace_err
+                
+                if validation_error is not None:
+                    tool_result = ToolResult(tool_call.id, validation_error, is_error=True)
+                    emit(f"Observation: {tool_result.content}")
+                    tool_result_blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_result.tool_call_id,
+                            "content": tool_result.content,
+                            "is_error": True,
+                        }
+                    )
+                    continue
 
-                    # 4. if validation failed, raise error
-                    if validation_error is not None:
-                        tool_result = ToolResult(tool_call.id, validation_error, is_error=True)
-                        emit(f"Observation: {tool_result.content}")
-                        tool_result_blocks.append(
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": tool_result.tool_call_id,
-                                "content": tool_result.content,
-                                "is_error": True
-                            }
-                        )
-                        continue
+                edit_preview = (path_str, old_content, new_content)
 
-                    # 5. validation passed, render diff and user confirmation
-                    if new_content is not None:
+            if decision.behavior == "deny":
+                # deny: return error observation，no UI shown
+                tool_result = ToolResult(tool_call.id, f"Error: {decision.message}", is_error=True)
+                emit(f"Observation: {tool_result.content}")
+                tool_result_blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_result.tool_call_id,
+                        "content": tool_result.content,
+                        "is_error": True,
+                    }
+                )
+                continue
+
+            elif decision.behavior == "ask":
+                if tool_call.name in ("file_write", "file_edit"):
+                    # --- for file_edit；ask only do diff + confirm ---
+                    if edit_preview is not None:
+                        path_str, old_content, new_content = edit_preview
                         diff_text = render_diff(old_content, new_content, path_str)
                         console.print(f"\n[bold]Diff for {path_str}:[/bold]")
                         console.print(diff_text)
                         if not confirm_edit(path_str):
-                            tool_result = ToolResult(tool_call.id, "Error: Edit not confirmed by user.", is_error=True)
+                            tool_result = ToolResult(tool_call.id, "Error: edit rejected by user", is_error=True)
                             emit(f"Observation: {tool_result.content}")
                             tool_result_blocks.append(
                                 {
                                     "type": "tool_result",
                                     "tool_use_id": tool_result.tool_call_id,
                                     "content": tool_result.content,
-                                    "is_error": True
+                                    "is_error": True,
                                 }
                             )
                             continue
+
                 elif tool_call.name == "bash":
                     command = tool_call.args.get("command", "")
                     timeout = tool_call.args.get("timeout", 30)
                     console.print(f"\n[bold yellow]Command:[/bold yellow] {command}")
                     console.print(f"[dim]timeout: {timeout}s  cwd: {ctx.cwd}[/dim]")
                     if not confirm_command(command):
-                        tool_result = ToolResult(tool_call.id, "Error: command is rejected by user", is_error=True)
+                        tool_result = ToolResult(tool_call.id, "Error: command rejected by user", is_error=True)
                         emit(f"Observation: {tool_result.content}")
                         tool_result_blocks.append(
                             {
@@ -200,18 +224,55 @@ def run_agent(
                             }
                         )
                         continue
-                        
-                tool_result = tools.run(tool_call, ctx)
-                emit(f"Observation: {tool_result.content}")
 
-                tool_result_blocks.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tool_result.tool_call_id,
-                        "content": tool_result.content,
-                        "is_error": tool_result.is_error
-                    }
-                )
+                elif tool_call.name in ("web_fetch", "web_search"):
+                    detail = tool_call.args.get("url") or tool_call.args.get("query") or str(tool_call.args)
+                    if not confirm_tool_use(tool_call.name, detail):
+                        tool_result = ToolResult(tool_call.id, "Error: tool use rejected by user", is_error=True)
+                        emit(f"Observation: {tool_result.content}")
+                        tool_result_blocks.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_result.tool_call_id,
+                                "content": tool_result.content,
+                                "is_error": True,
+                            }
+                        )
+                        continue
+
+                elif tool_call.name == "ask_user_question":
+                    question = tool_call.args.get("prompt", "")
+                    options = tool_call.args.get("options", [])
+                    if not isinstance(options, list):
+                        options = []
+                    labels = [str(o) for o in options]
+                    selected = prompt_single_choice(question, labels)
+                    if selected is None:
+                        tool_result = ToolResult(tool_call.id, "User skipped the question.", is_error=False)
+                    else:
+                        tool_result = ToolResult(tool_call.id, f'User selected: "{selected}"', is_error=False)
+                    emit(f"observation: {tool_result.content}")
+                    tool_result_blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_result.tool_call_id,
+                            "content": tool_result.content,
+                            "is_error": tool_result.is_error,
+                        }
+                    )
+                    continue
+                    
+            tool_result = tools.run(tool_call, ctx)
+            emit(f"Observation: {tool_result.content}")
+
+            tool_result_blocks.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_result.tool_call_id,
+                    "content": tool_result.content,
+                    "is_error": tool_result.is_error
+                }
+            )
             messages.append({"role": "user", "content": tool_result_blocks})
 
     final_response = f"Stopped after reaching max steps: {max_steps}"

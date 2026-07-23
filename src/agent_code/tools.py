@@ -443,6 +443,16 @@ def bash(args: dict[str, Any], ctx: ToolContext) -> str:
         return "Error: background mode not implemented yet (coming in v4)"
     return _bash_run_sync(command, ctx.cwd, timeout=timeout)
 
+def _ask_user_question(args: dict[str, Any], ctx: ToolContext) -> str:
+    """Handled by agent.py's interceptor — this function never reads stdin itself."""
+    prompt = args.get("prompt", "")
+    options = args.get("options", [])
+    if not prompt:
+        return "Error: 'prompt' argument is required."
+    if not options or not isinstance(options, list):
+        return "Error: 'options' argument must be a non-empty list"
+    return "Error: ask_user_question must be handled by the harness, not executed directly"
+
 class ToolRegistry:
     def __init__(self) -> None:
         self.tools: dict[str, Tool] = {}
@@ -670,6 +680,23 @@ def create_default_tool_registry() -> ToolRegistry:
             },
             "required": ["command"],
         },
+    ))
+    registry.register_tool(Tool(
+        name="ask_user_question",
+        description=(
+                "Ask the user a structured single-choice question. "
+                "Use when you need to decide between multiple approaches "
+                "or need user preference before proceeding."
+            ),
+        run=_ask_user_question,
+        parameters={
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "The question to ask the user. Should end with a question mark."},
+                "options": {"type": "array", "items": {"type": "string"}, "description": "List of options for the user to choose from. (2 - 4 options recommended)"},
+            },
+            "required": ["prompt", "options"]
+        }
     ))
 
     return registry

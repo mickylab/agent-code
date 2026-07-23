@@ -36,10 +36,11 @@ def run_once(
     model: str,
     base_url: str | None,
     max_steps: int,
+    permission_mode: str,
 ) -> None:
     provider = create_provider(provider_name, model, base_url) #TODO: use slash command to change provider/model on the fly
     default_tools = create_default_tool_registry()
-    run_agent(prompt, provider, default_tools, max_steps = max_steps, cwd = cwd, stream = False)
+    run_agent(prompt, provider, default_tools, max_steps = max_steps, cwd = cwd, permission_mode = permission_mode, stream = False)
 
 @app.callback(invoke_without_command=True)
 def main_command(
@@ -48,12 +49,13 @@ def main_command(
     provider: str = typer.Option("anthropic", "--provider", "-p", help="The model provider to use"),
     model: str = typer.Option("gemma-4-e4b-it-4bit", "--model", "-m", help="The model to use"),
     base_url: str | None = typer.Option(None, "--base-url", "-b", help="The base URL for the model provider"),
-    max_steps: int = typer.Option(8, "--max-steps", "-s", help="The maximum number of steps for the agent to take")
+    max_steps: int = typer.Option(8, "--max-steps", "-s", help="The maximum number of steps for the agent to take"),
+    permission_mode: str = typer.Option("default", "--permission-mode", help="Permission mode: default, acceptEdits, plan"),
     ) -> None:
     resolved_cwd = cwd.resolve()
     text = prompt.strip()
     if text:
-        run_once(text, resolved_cwd, provider, model, base_url, max_steps)
+        run_once(text, resolved_cwd, provider, model, base_url, max_steps, permission_mode)
         return
     
     # if no prompt provided, enter interactive mode
@@ -75,7 +77,7 @@ def main_command(
                 else:
                     console.print(f"[bold red]Unknown command: {user_input}[/bold red]")
                     continue
-            run_once(user_input, resolved_cwd, provider, model, base_url, max_steps)
+            run_once(user_input, resolved_cwd, provider, model, base_url, max_steps, permission_mode)
         except KeyboardInterrupt:
             console.print("\n[bold red]Exiting...[/bold red]")
             break
