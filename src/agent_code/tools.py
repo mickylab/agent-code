@@ -440,7 +440,16 @@ def bash(args: dict[str, Any], ctx: ToolContext) -> str:
     background = bool(args.get("background", False))
     # v1 sync only；v4 implement background=True branch
     if background:
-        return "Error: background mode not implemented yet (coming in v4)"
+        # Background execution: spawn the child, return structured info, don't block the Agent Loop
+        from .bg_manager import start_background
+        result = start_background(command, ctx.cwd)
+        return (
+            f"Command running in background with ID: {result['background_id']}.\n"
+            f"Output is being written to: {result['output_file']}\n"
+            f"Stderr is being written to: {result['stderr_file']}\n"
+            f"PID: {result['pid']}\n\n"
+            f"{result['message']}"
+        )
     return _bash_run_sync(command, ctx.cwd, timeout=timeout)
 
 def _ask_user_question(args: dict[str, Any], ctx: ToolContext) -> str:
